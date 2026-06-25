@@ -5,10 +5,12 @@ channel**. After one agent sends a message to another and needs the answer befor
 it can continue, it *arms* `await-reply` in the background. The primitive sleeps at
 near-zero cost and signals the moment the reply lands — or when a deadline passes.
 
-It is the companion to the **file-based inbox protocol** (a separate package).
-The inbox gives you durable, asynchronous mailboxes; `await-reply` gives you the
-ability to *block on a specific reply* without busy-polling, hand-relaying through
-a human, or burning compute while you wait.
+It is the companion to the [**file-based inbox protocol**](https://github.com/localnexus/inbox)
+(a separate package). The inbox gives you durable, asynchronous mailboxes;
+`await-reply` gives you the ability to *block on a specific reply* without
+busy-polling, hand-relaying through a human, or burning compute while you wait. Use
+the inbox alone for fire-and-forget messaging; reach for `await-reply` when a reply
+is blocking.
 
 ```
 send a message ──► (inbox protocol delivers it)
