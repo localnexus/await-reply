@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# await-reply — a reply-waiting primitive for file-based agent inboxes.
+#
+# After sending a message and needing the reply before you can continue, run this
+# in the BACKGROUND on a host that re-invokes (or notifies) the caller when a
+# background task finishes. It sleeps at --interval and exits the instant a NEW
+# message from <sender> appears in the inbox, or at --timeout. While it sleeps it
+# costs nothing — no model tokens, no busy-loop.
+#
+# It pairs with the file-based inbox protocol: it matches the inbox filename
+# convention `YYYY.MM.DD.HHMM_from-<sender>_<topic>.md`.
+#
+# Exit codes (the re-woken caller reads these):
+#   0  reply landed   — matching path(s) on stdout
+#   3  timeout        — no new reply within the cap
+#   2  error/bad args — fail loud; do not silently proceed
+#
+# Diagnostics go to stderr; only matched paths go to stdout.
+
+set -u
+PROG=${0##*/}
+interval=60
+timeout=3600
+inbox=${INBOX_DIR:-}
+sender=""
+
+usage() {
+  printf 'usage: %s <sender> [--interval S] [--timeout S] [--inbox DIR]\n' "$PROG" >&2
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --interval) interval=${2:-}; shift 2 ;;
+    --timeout)  timeout=${2:-};  shift 2 ;;
+    --inbox)    inbox=${2:-};    shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --*) printf '%s: unknown option: %s\n' "$PROG" "$1" >&2; usage; exit 2 ;;
+    *)  if [ -z "$sender" ]; then sender=$1; shift
+        else printf '%s: unexpected argument: %s\n' "$PROG" "$1" >&2; exit 2; fi ;;
+  esac
+done
+
+# --- validate -------------------------------------------------------------
+[ -n "$sender" ] || { printf '%s: <sender> is required\n' "$PROG" >&2; usage; exit 2; }
+case "$interval" in ''|*[!0-9]*) printf '%s: --interval must be a positive integer\n' "$PROG" >&2; exit 2 ;; esac
+case "$timeout"  in ''|*[!0-9]*) printf '%s: --timeout must be a positive integer\n'  "$PROG" >&2; exit 2 ;; esac
+{ [ "$interval" -gt 0 ] && [ "$timeout" -gt 0 ]; } || { printf '%s: interval/timeout must be > 0\n' "$PROG" >&2; exit 2; }
+[ -n "$inbox" ] || { printf '%s: no inbox — pass --inbox DIR or set $INBOX_DIR\n' "$PROG" >&2; exit 2; }
+[ -d "$inbox" ] || { printf '%s: inbox not found: %s\n' "$PROG" "$inbox" >&2; exit 2; }
+
+# Portable mtime in epoch seconds: BSD/macOS stat, falling back to GNU/Linux stat.
+mtime() { stat -f %m -- "$1" 2>/dev/null || stat -c %Y -- "$1" 2>/dev/null; }
+
+arm_ts=$(date +%s)
+deadline=$(( arm_ts + timeout ))
+printf '%s: armed — watching %s for *_from-%s_*.md (interval %ss, cap %ss)\n' \
+  "$PROG" "$inbox" "$sender" "$interval" "$timeout" >&2
+
+# --- watch loop -----------------------------------------------------------
+# Match condition: a NEW top-level `*_from-<sender>_*.md` whose mtime is strictly
+# later than arm time. Strict `>` excludes messages that pre-dated the wait; the
+# non-recursive glob ignores any processed/ or sent/ subdirectories.
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  matched=""
+  for f in "$inbox"/*_from-"$sender"_*.md; do
+    [ -e "$f" ] || continue                      # guard the no-match glob
+    mt=$(mtime "$f"); [ -n "$mt" ] || continue
+    [ "$mt" -gt "$arm_ts" ] && matched="${matched}${f}
+"
+  done
+  if [ -n "$matched" ]; then
+    printf 'REPLY from %s:\n' "$sender" >&2
+    printf '%s' "$matched"                        # paths on stdout
+    exit 0
+  fi
+  sleep "$interval"
+done
+
+printf 'TIMEOUT: %ss elapsed, no new reply from %s\n' "$timeout" "$sender" >&2
+exit 3
